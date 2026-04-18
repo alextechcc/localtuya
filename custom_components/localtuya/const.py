@@ -109,6 +109,7 @@ CONF_HVAC_ACTION_DP = "hvac_action_dp"
 CONF_HVAC_ACTION_SET = "hvac_action_set"
 CONF_ECO_DP = "eco_dp"
 CONF_ECO_VALUE = "eco_value"
+CONF_SLEEP_DP = "sleep_dp"
 
 # vacuum
 CONF_POWERGO_DP = "powergo_dp"

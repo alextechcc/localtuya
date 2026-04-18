@@ -17,6 +17,7 @@ from homeassistant.components.climate.const import (
     PRESET_ECO,
     PRESET_HOME,
     PRESET_NONE,
+    PRESET_SLEEP,
     ClimateEntityFeature,
     FAN_AUTO,
     FAN_LOW,
@@ -59,6 +60,7 @@ from .const import (
     CONF_HVAC_FAN_MODE_SET,
     CONF_HVAC_SWING_MODE_DP,
     CONF_HVAC_SWING_MODE_SET,
+    CONF_SLEEP_DP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -92,6 +94,28 @@ HVAC_MODE_SETS = {
         HVACMode.FAN_ONLY: "wind",
         HVACMode.DRY: "wet",
         HVACMode.COOL: "cold",
+        HVACMode.AUTO: "auto",
+    },
+    "Auto/Cold/Dry/Wind/Hot/Eco": {
+        HVACMode.HEAT: "hot",
+        HVACMode.FAN_ONLY: "wind",
+        HVACMode.DRY: "wet",
+        HVACMode.COOL: "cold",
+        HVACMode.AUTO: "auto",
+        "eco": "eco",
+    },
+    "Hot/Cold/Dry/Wind/Eco": {
+        HVACMode.HEAT: "hot",
+        HVACMode.COOL: "cold",
+        HVACMode.DRY: "wet",
+        HVACMode.FAN_ONLY: "wind",
+        "Eco": "eco",
+    },
+    "Hot/Cold/Dry/Wind": {
+        HVACMode.HEAT: "hot",
+        HVACMode.COOL: "cold",
+        HVACMode.DRY: "wet",
+        HVACMode.FAN_ONLY: "wind",
         HVACMode.AUTO: "auto",
     },
     "Cold/Dehumidify/Hot": {
@@ -133,7 +157,12 @@ HVAC_FAN_MODE_SETS = {
         FAN_MEDIUM: "middle",
         FAN_HIGH: "high",
         FAN_TOP: "strong",
-    }
+    },
+    "Low/High/Silent": {
+        FAN_LOW: "mute",
+        FAN_MEDIUM: "low",
+        FAN_HIGH: "high",
+    },
 }
 HVAC_SWING_MODE_SETS = {
     "True/False": {
@@ -186,6 +215,7 @@ def flow_schema(dps):
         vol.Optional(CONF_HVAC_ACTION_SET): vol.In(list(HVAC_ACTION_SETS.keys())),
         vol.Optional(CONF_ECO_DP): vol.In(dps),
         vol.Optional(CONF_ECO_VALUE): str,
+        vol.Optional(CONF_SLEEP_DP): vol.In(dps),
         vol.Optional(CONF_PRESET_DP): vol.In(dps),
         vol.Optional(CONF_PRESET_SET): vol.In(list(PRESET_SETS.keys())),
         vol.Optional(CONF_TEMPERATURE_UNIT): vol.In(
@@ -242,8 +272,11 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         )
         self._conf_eco_dp = self._config.get(CONF_ECO_DP)
         self._conf_eco_value = self._config.get(CONF_ECO_VALUE, "ECO")
-        self._has_presets = self.has_config(CONF_ECO_DP) or self.has_config(
-            CONF_PRESET_DP
+        self._conf_sleep_dp = self._config.get(CONF_SLEEP_DP)
+        self._has_presets = (
+            self.has_config(CONF_ECO_DP)
+            or self.has_config(CONF_PRESET_DP)
+            or self.has_config(CONF_SLEEP_DP)
         )
         _LOGGER.debug("Initialized climate [%s]", self.name)
 
@@ -293,7 +326,7 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         """Return the list of available operation modes."""
         if not self.has_config(CONF_HVAC_MODE_DP):
             return None
-        return list(self._conf_hvac_mode_set) + [HVACMode.OFF]
+        return [HVACMode.OFF] + list(self._conf_hvac_mode_set)
 
     @property
     def hvac_action(self):
@@ -331,9 +364,11 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         """Return the list of available presets modes."""
         if not self._has_presets:
             return None
-        presets = list(self._conf_preset_set)
+        presets = [PRESET_NONE] + list(self._conf_preset_set)
         if self._conf_eco_dp:
             presets.append(PRESET_ECO)
+        if self._conf_sleep_dp is not None:
+            presets.append(PRESET_SLEEP)
         return presets
 
     @property
@@ -430,8 +465,15 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
 
     async def async_set_preset_mode(self, preset_mode):
         """Set new target preset mode."""
+        if preset_mode == PRESET_SLEEP:
+            await self._device.set_dp(True, self._conf_sleep_dp)
+            return
+        if self._conf_sleep_dp is not None:
+            await self._device.set_dp(False, self._conf_sleep_dp)
         if preset_mode == PRESET_ECO:
             await self._device.set_dp(self._conf_eco_value, self._conf_eco_dp)
+            return
+        if preset_mode == PRESET_NONE:
             return
         await self._device.set_dp(
             self._conf_preset_set[preset_mode], self._conf_preset_dp
@@ -466,7 +508,9 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
             )
 
         if self._has_presets:
-            if (
+            if self._conf_sleep_dp is not None and self.dps(self._conf_sleep_dp):
+                self._preset_mode = PRESET_SLEEP
+            elif (
                 self.has_config(CONF_ECO_DP)
                 and self.dps_conf(CONF_ECO_DP) == self._conf_eco_value
             ):
