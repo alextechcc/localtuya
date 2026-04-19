@@ -466,6 +466,7 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
                 and self._true_temperature is not None
                 and self._current_temperature is not None
             ):
+                self._target_temperature = user_temp
                 adjusted = user_temp + (self._current_temperature - self._true_temperature)
             else:
                 adjusted = user_temp
@@ -567,10 +568,13 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
                 and self._true_temperature is not None
                 and self._current_temperature is not None
             ):
-                # Un-apply the AC offset so the UI shows the user's intended temperature.
-                self._target_temperature = device_temp + (
-                    self._true_temperature - self._current_temperature
-                )
+                # Only initialize from the device on the first update; after that
+                # _target_temperature is owned by the user and must not be recomputed
+                # from the device DP (which carries the adjusted value, not user intent).
+                if self._target_temperature is None:
+                    self._target_temperature = device_temp + (
+                        self._true_temperature - self._current_temperature
+                    )
             else:
                 self._target_temperature = device_temp
 
