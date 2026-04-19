@@ -419,6 +419,8 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
     @property
     def current_temperature(self):
         """Return the current temperature."""
+        if self._true_temp_entity_id and self._true_temperature is not None:
+            return self._true_temperature
         return self._current_temperature
 
     @property
