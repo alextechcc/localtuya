@@ -122,6 +122,7 @@
                     "eco_dp": "Eco DP (optional)",
                     "eco_value": "Eco value (optional)",
                     "heuristic_action": "Enable heuristic action (optional)",
+                    "true_temperature_entity": "True temperature entity ID (optional, for AC offset compensation)",
                     "dps_default_value": "Default value when un-initialised (optional)",
                     "restore_on_reconnect": "Restore the last set value in HomeAssistant after a lost connection",
                     "min_value": "Minimum Value",
