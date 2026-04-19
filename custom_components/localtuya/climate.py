@@ -3,6 +3,8 @@ import asyncio
 import logging
 from functools import partial
 
+from homeassistant.helpers.event import async_track_state_change_event
+
 import voluptuous as vol
 from homeassistant.components.climate import (
     DEFAULT_MAX_TEMP,
@@ -61,6 +63,7 @@ from .const import (
     CONF_HVAC_SWING_MODE_DP,
     CONF_HVAC_SWING_MODE_SET,
     CONF_SLEEP_DP,
+    CONF_TRUE_TEMPERATURE_ENTITY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -225,6 +228,7 @@ def flow_schema(dps):
             [PRECISION_WHOLE, PRECISION_HALVES, PRECISION_TENTHS]
         ),
         vol.Optional(CONF_HEURISTIC_ACTION): bool,
+        vol.Optional(CONF_TRUE_TEMPERATURE_ENTITY): str,
     }
 
 
@@ -273,12 +277,53 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         self._conf_eco_dp = self._config.get(CONF_ECO_DP)
         self._conf_eco_value = self._config.get(CONF_ECO_VALUE, "ECO")
         self._conf_sleep_dp = self._config.get(CONF_SLEEP_DP)
+        self._true_temp_entity_id = self._config.get(CONF_TRUE_TEMPERATURE_ENTITY) or None
+        self._true_temperature = None
         self._has_presets = (
             self.has_config(CONF_ECO_DP)
             or self.has_config(CONF_PRESET_DP)
             or self.has_config(CONF_SLEEP_DP)
         )
         _LOGGER.debug("Initialized climate [%s]", self.name)
+
+    async def async_added_to_hass(self):
+        """Subscribe to state changes of the true temperature entity."""
+        await super().async_added_to_hass()
+        if not self._true_temp_entity_id:
+            return
+        state = self.hass.states.get(self._true_temp_entity_id)
+        if state and state.state not in ("unknown", "unavailable"):
+            try:
+                self._true_temperature = float(state.state)
+            except ValueError:
+                pass
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass,
+                [self._true_temp_entity_id],
+                self._async_true_temp_changed,
+            )
+        )
+
+    async def _async_true_temp_changed(self, event):
+        """Handle state change of the true temperature entity."""
+        new_state = event.data.get("new_state")
+        if new_state is None or new_state.state in ("unknown", "unavailable"):
+            return
+        try:
+            self._true_temperature = float(new_state.state)
+        except ValueError:
+            return
+        if (
+            self._target_temperature is not None
+            and self._current_temperature is not None
+            and self.has_config(CONF_TARGET_TEMPERATURE_DP)
+        ):
+            adjusted = self._target_temperature + (
+                self._current_temperature - self._true_temperature
+            )
+            raw = round(adjusted / self._target_precision)
+            await self._device.set_dp(raw, self._config[CONF_TARGET_TEMPERATURE_DP])
 
     @property
     def supported_features(self):
@@ -413,7 +458,16 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
     async def async_set_temperature(self, **kwargs):
         """Set new target temperature."""
         if ATTR_TEMPERATURE in kwargs and self.has_config(CONF_TARGET_TEMPERATURE_DP):
-            temperature = round(kwargs[ATTR_TEMPERATURE] / self._target_precision)
+            user_temp = kwargs[ATTR_TEMPERATURE]
+            if (
+                self._true_temp_entity_id
+                and self._true_temperature is not None
+                and self._current_temperature is not None
+            ):
+                adjusted = user_temp + (self._current_temperature - self._true_temperature)
+            else:
+                adjusted = user_temp
+            temperature = round(adjusted / self._target_precision)
             await self._device.set_dp(
                 temperature, self._config[CONF_TARGET_TEMPERATURE_DP]
             )
@@ -497,15 +551,26 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         """Device status was updated."""
         self._state = self.dps(self._dp_id)
 
-        if self.has_config(CONF_TARGET_TEMPERATURE_DP):
-            self._target_temperature = (
-                self.dps_conf(CONF_TARGET_TEMPERATURE_DP) * self._target_precision
-            )
-
         if self.has_config(CONF_CURRENT_TEMPERATURE_DP):
             self._current_temperature = (
                 self.dps_conf(CONF_CURRENT_TEMPERATURE_DP) * self._precision
             )
+
+        if self.has_config(CONF_TARGET_TEMPERATURE_DP):
+            device_temp = (
+                self.dps_conf(CONF_TARGET_TEMPERATURE_DP) * self._target_precision
+            )
+            if (
+                self._true_temp_entity_id
+                and self._true_temperature is not None
+                and self._current_temperature is not None
+            ):
+                # Un-apply the AC offset so the UI shows the user's intended temperature.
+                self._target_temperature = device_temp + (
+                    self._true_temperature - self._current_temperature
+                )
+            else:
+                self._target_temperature = device_temp
 
         if self._has_presets:
             if self._conf_sleep_dp is not None and self.dps(self._conf_sleep_dp):
