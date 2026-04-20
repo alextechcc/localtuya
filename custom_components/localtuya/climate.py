@@ -73,6 +73,7 @@ from .const import (
     CONF_PROTOCOL_VERSION,
     CONF_SLEEP_DP,
     CONF_TRUE_TEMPERATURE_ENTITY,
+    DOMAIN as LOCALTUYA_DOMAIN,
     TUYA_DEVICES,
 )
 
@@ -703,7 +704,7 @@ class LocaltuyaACTemperatureSensor(RestoreEntity, SensorEntity):
     def device_info(self):
         model = self._dev_entry.get(CONF_MODEL, "Tuya generic")
         return {
-            "identifiers": {(DOMAIN, f"local_{self._dev_entry[CONF_DEVICE_ID]}")},
+            "identifiers": {(LOCALTUYA_DOMAIN, f"local_{self._dev_entry[CONF_DEVICE_ID]}")},
             "name": self._dev_entry[CONF_FRIENDLY_NAME],
             "manufacturer": "Tuya",
             "model": f"{model} ({self._dev_entry[CONF_DEVICE_ID]})",
@@ -718,12 +719,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     for dev_id, dev_entry in config_entry.data.get("devices", {}).items():
         climate_configs = [
             e for e in dev_entry.get(CONF_ENTITIES, [])
-            if e.get(CONF_PLATFORM) == DOMAIN
+            if e.get(CONF_PLATFORM) == DOMAIN  # DOMAIN == "climate" here
         ]
         if not climate_configs:
             continue
 
-        tuyainterface = hass.data[DOMAIN][TUYA_DEVICES][dev_id]
+        tuyainterface = hass.data[LOCALTUYA_DOMAIN][TUYA_DEVICES][dev_id]
         dps_config_fields = list(get_dps_for_platform(flow_schema))
         dev_entities = []
 
