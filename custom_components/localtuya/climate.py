@@ -1,11 +1,13 @@
 """Platform to locally control Tuya-based climate devices."""
 import asyncio
 import logging
-from functools import partial
 
 from homeassistant.helpers.event import async_track_state_change_event
 
 import voluptuous as vol
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.components.climate import (
     DEFAULT_MAX_TEMP,
     DEFAULT_MIN_TEMP,
@@ -31,6 +33,11 @@ from homeassistant.components.climate.const import (
 )
 from homeassistant.const import (
     ATTR_TEMPERATURE,
+    CONF_DEVICE_ID,
+    CONF_ENTITIES,
+    CONF_FRIENDLY_NAME,
+    CONF_ID,
+    CONF_PLATFORM,
     CONF_TEMPERATURE_UNIT,
     PRECISION_HALVES,
     PRECISION_TENTHS,
@@ -38,7 +45,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 
-from .common import LocalTuyaEntity, async_setup_entry
+from .common import LocalTuyaEntity, get_dps_for_platform
 from .const import (
     CONF_CURRENT_TEMPERATURE_DP,
     CONF_TEMP_MAX,
@@ -62,8 +69,11 @@ from .const import (
     CONF_HVAC_FAN_MODE_SET,
     CONF_HVAC_SWING_MODE_DP,
     CONF_HVAC_SWING_MODE_SET,
+    CONF_MODEL,
+    CONF_PROTOCOL_VERSION,
     CONF_SLEEP_DP,
     CONF_TRUE_TEMPERATURE_ENTITY,
+    TUYA_DEVICES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -634,4 +644,108 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
                 self._hvac_action = action
 
 
-async_setup_entry = partial(async_setup_entry, DOMAIN, LocaltuyaClimate, flow_schema)
+class LocaltuyaACTemperatureSensor(RestoreEntity, SensorEntity):
+    """Sensor reporting the temperature as measured by the AC unit itself."""
+
+    def __init__(self, device, dev_entry, climate_config):
+        super().__init__()
+        self._device = device
+        self._dev_entry = dev_entry
+        self._climate_config = climate_config
+        self._temperature = None
+        self._precision = climate_config.get(CONF_PRECISION, DEFAULT_PRECISION)
+        self._dp_key = str(climate_config[CONF_CURRENT_TEMPERATURE_DP])
+
+    async def async_added_to_hass(self):
+        await super().async_added_to_hass()
+        signal = f"localtuya_{self._dev_entry[CONF_DEVICE_ID]}"
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, signal, self._handle_status)
+        )
+
+    def _handle_status(self, status):
+        if status is None or self._dp_key not in status:
+            return
+        self._temperature = status[self._dp_key] * self._precision
+        self.schedule_update_ha_state()
+
+    @property
+    def unique_id(self):
+        return f"local_{self._dev_entry[CONF_DEVICE_ID]}_{self._dp_key}_ac_temp"
+
+    @property
+    def name(self):
+        return f"{self._climate_config[CONF_FRIENDLY_NAME]} AC Measured Temperature"
+
+    @property
+    def native_value(self):
+        return self._temperature
+
+    @property
+    def native_unit_of_measurement(self):
+        if self._climate_config.get(CONF_TEMPERATURE_UNIT) == TEMPERATURE_FAHRENHEIT:
+            return UnitOfTemperature.FAHRENHEIT
+        return UnitOfTemperature.CELSIUS
+
+    @property
+    def device_class(self):
+        return SensorDeviceClass.TEMPERATURE
+
+    @property
+    def state_class(self):
+        return SensorStateClass.MEASUREMENT
+
+    @property
+    def should_poll(self):
+        return False
+
+    @property
+    def device_info(self):
+        model = self._dev_entry.get(CONF_MODEL, "Tuya generic")
+        return {
+            "identifiers": {(DOMAIN, f"local_{self._dev_entry[CONF_DEVICE_ID]}")},
+            "name": self._dev_entry[CONF_FRIENDLY_NAME],
+            "manufacturer": "Tuya",
+            "model": f"{model} ({self._dev_entry[CONF_DEVICE_ID]})",
+            "sw_version": self._dev_entry[CONF_PROTOCOL_VERSION],
+        }
+
+
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    """Set up LocalTuya climate entities and companion AC temperature sensors."""
+    entities = []
+
+    for dev_id, dev_entry in config_entry.data.get("devices", {}).items():
+        climate_configs = [
+            e for e in dev_entry.get(CONF_ENTITIES, [])
+            if e.get(CONF_PLATFORM) == DOMAIN
+        ]
+        if not climate_configs:
+            continue
+
+        tuyainterface = hass.data[DOMAIN][TUYA_DEVICES][dev_id]
+        dps_config_fields = list(get_dps_for_platform(flow_schema))
+        dev_entities = []
+
+        for entity_config in climate_configs:
+            for dp_conf in dps_config_fields:
+                if dp_conf in entity_config:
+                    tuyainterface.dps_to_request[entity_config[dp_conf]] = None
+
+            dev_entities.append(
+                LocaltuyaClimate(tuyainterface, dev_entry, entity_config[CONF_ID])
+            )
+
+            if (
+                entity_config.get(CONF_TRUE_TEMPERATURE_ENTITY)
+                and entity_config.get(CONF_CURRENT_TEMPERATURE_DP)
+            ):
+                dev_entities.append(
+                    LocaltuyaACTemperatureSensor(tuyainterface, dev_entry, entity_config)
+                )
+
+        tuyainterface.add_entities(dev_entities)
+        entities.extend(dev_entities)
+
+    if entities:
+        async_add_entities(entities)
