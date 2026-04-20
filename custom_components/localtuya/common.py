@@ -348,7 +348,10 @@ class TuyaDevice(pytuya.TuyaListener, pytuya.ContextualLogger):
 
     def _dispatch_status(self):
         signal = f"localtuya_{self._dev_config_entry[CONF_DEVICE_ID]}"
-        async_dispatcher_send(self._hass, signal, self._status)
+        status = self._status.copy()
+        self._hass.loop.call_soon_threadsafe(
+            async_dispatcher_send, self._hass, signal, status
+        )
 
     @callback
     def disconnected(self):
