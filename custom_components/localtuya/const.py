@@ -111,6 +111,7 @@ CONF_ECO_DP = "eco_dp"
 CONF_ECO_VALUE = "eco_value"
 CONF_SLEEP_DP = "sleep_dp"
 CONF_TRUE_TEMPERATURE_ENTITY = "true_temperature_entity"
+CONF_POWER_LEVEL_ENTITY = "power_level_entity"
 
 # vacuum
 CONF_POWERGO_DP = "powergo_dp"
