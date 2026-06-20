@@ -131,6 +131,13 @@ class PowerMonitor:
         self._min = None
         self._max = None
 
+    def restore(self, minimum, maximum):
+        """Seed the learned range from persisted state (value stays unknown)."""
+        if minimum is None or maximum is None or maximum < minimum:
+            return
+        self._min = minimum
+        self._max = maximum
+
     def update(self, power):
         if power is None:
             return
@@ -685,10 +692,26 @@ class SelfTuningPID:
         base = self.refiner.baseline
         if base is not None:
             snap["base_kp"], snap["base_ki"], snap["base_kd"] = base
+        if self.power.minimum is not None:
+            snap["power_min"] = self.power.minimum
+            snap["power_max"] = self.power.maximum
         return snap
 
     def restore(self, data):
-        if not data or data.get("phase") != PHASE_TUNED:
+        if not data:
+            return
+        # The learned power range is telemetry - restore it regardless of tuning
+        # state so the cascade/saturation logic need not relearn the compressor's
+        # range (and risk a narrow-range cold start) after every restart.
+        try:
+            pmin = data.get("power_min")
+            pmax = data.get("power_max")
+            if pmin is not None and pmax is not None:
+                self.power.restore(float(pmin), float(pmax))
+        except (TypeError, ValueError):
+            pass
+
+        if data.get("phase") != PHASE_TUNED:
             return
         try:
             base = (
