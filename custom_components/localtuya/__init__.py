@@ -33,8 +33,10 @@ from .common import TuyaDevice, async_config_entry_by_device_id
 from .config_flow import ENTRIES_VERSION, config_schema
 from .const import (
     ATTR_UPDATED_AT,
+    CONF_CURRENT_TEMPERATURE_DP,
     CONF_NO_CLOUD,
     CONF_PRODUCT_KEY,
+    CONF_TRUE_TEMPERATURE_ENTITY,
     CONF_USER_ID,
     DATA_CLOUD,
     DATA_DISCOVERY,
@@ -46,6 +48,26 @@ from .discovery import TuyaDiscovery
 _LOGGER = logging.getLogger(__name__)
 
 UNSUB_LISTENER = "unsub_listener"
+
+
+def _required_platforms(entities):
+    """Platforms needed for a device's entities, including PID companions.
+
+    A climate entity configured with a true-temperature sensor pulls in
+    companion entities on the ``sensor`` (AC temperature + PID diagnostics),
+    ``switch`` (overshoot / True Auto toggles) and ``button`` (force re-tune)
+    platforms, which would otherwise never be set up because the device has no
+    native entity of those types.
+    """
+    platforms = set(entity[CONF_PLATFORM] for entity in entities)
+    for entity in entities:
+        if (
+            entity[CONF_PLATFORM] == "climate"
+            and entity.get(CONF_TRUE_TEMPERATURE_ENTITY)
+            and entity.get(CONF_CURRENT_TEMPERATURE_DP)
+        ):
+            platforms.update(("sensor", "switch", "button"))
+    return platforms
 
 RECONNECT_INTERVAL = timedelta(seconds=60)
 
@@ -266,9 +288,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     platforms = set()
     for dev_id in entry.data[CONF_DEVICES].keys():
         entities = entry.data[CONF_DEVICES][dev_id][CONF_ENTITIES]
-        platforms = platforms.union(
-            set(entity[CONF_PLATFORM] for entity in entities)
-        )
+        platforms = platforms.union(_required_platforms(entities))
         hass.data[DOMAIN][TUYA_DEVICES][dev_id] = TuyaDevice(hass, entry, dev_id)
 
     # Setup all platforms at once, letting HA handling each platform and avoiding
@@ -294,8 +314,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     platforms = {}
 
     for dev_id, dev_entry in entry.data[CONF_DEVICES].items():
-        for entity in dev_entry[CONF_ENTITIES]:
-            platforms[entity[CONF_PLATFORM]] = True
+        for platform in _required_platforms(dev_entry[CONF_ENTITIES]):
+            platforms[platform] = True
 
     unload_ok = all(
         await asyncio.gather(
