@@ -55,9 +55,9 @@ def _required_platforms(entities):
 
     A climate entity configured with a true-temperature sensor pulls in
     companion entities on the ``sensor`` (AC temperature + PID diagnostics),
-    ``switch`` (overshoot / True Auto toggles) and ``button`` (force re-tune)
-    platforms, which would otherwise never be set up because the device has no
-    native entity of those types.
+    ``switch`` (overshoot / True Auto toggles), ``button`` (force re-tune) and
+    ``number`` (overshoot hysteresis) platforms, which would otherwise never be
+    set up because the device has no native entity of those types.
     """
     platforms = set(entity[CONF_PLATFORM] for entity in entities)
     for entity in entities:
@@ -66,7 +66,7 @@ def _required_platforms(entities):
             and entity.get(CONF_TRUE_TEMPERATURE_ENTITY)
             and entity.get(CONF_CURRENT_TEMPERATURE_DP)
         ):
-            platforms.update(("sensor", "switch", "button"))
+            platforms.update(("sensor", "switch", "button", "number"))
     return platforms
 
 RECONNECT_INTERVAL = timedelta(seconds=60)
