@@ -98,13 +98,13 @@ PID_SAMPLE_TIME = 60  # seconds
 # toggle power again - protects the compressor from short-cycling.
 MIN_CYCLE_TIME = 180  # seconds
 
-# The cutoff only fires when the commanded offset opposes the mode by at least
-# this margin (deg C, unit-scaled), so noise near the setpoint cannot toggle it.
-CUTOFF_DEADBAND_C = 0.5
-
-# "True Auto": software heat/cool/off control. Band around the setpoint within
-# which neither heating nor cooling runs (deg C, unit-scaled).
-AUTO_DEADBAND_C = 0.5
+# Default cycling deadband around the setpoint (working units), used when the
+# user has not set the companion "Overshoot Hysteresis" number. The unit idles
+# (overshoot cutoff fires / True Auto goes neutral) once the true temperature
+# passes the setpoint by half this band, and only re-engages once it returns
+# half this band to the demand side - so the full swing before re-engaging is
+# one hysteresis width, which keeps a sluggish AC from short-cycling.
+DEFAULT_HYSTERESIS = 2.0
 
 # Minimum time between heat<->cool reversals in True Auto, to protect the
 # reversing valve / compressor from rapid mode flipping.
@@ -351,8 +351,6 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         # dynamics differ, so each mode gets its own parameter set.
         self._pid_cool = SelfTuningPID(scale=unit_scale, mode_sign=-1)
         self._pid_heat = SelfTuningPID(scale=unit_scale, mode_sign=1)
-        self._cutoff_deadband = CUTOFF_DEADBAND_C * unit_scale
-        self._auto_deadband = AUTO_DEADBAND_C * unit_scale
         self._pid_lock = asyncio.Lock()
         self._pid_forced_off = False
         self._last_power_change = None  # loop time of the last forced on/off
@@ -506,6 +504,19 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         return False
 
     @property
+    def _hysteresis(self):
+        """Cycling deadband around the setpoint (working units).
+
+        Read live from the companion "Overshoot Hysteresis" number when set,
+        otherwise the built-in default.
+        """
+        if self._shared_state is not None:
+            value = self._shared_state.get("hysteresis")
+            if value is not None:
+                return value
+        return DEFAULT_HYSTERESIS
+
+    @property
     def _power_cascade_enabled(self):
         """Whether the inner power-tracking cascade is on (needs a power input)."""
         if self._power_level_entity_id is None or self._shared_state is None:
@@ -606,15 +617,18 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
 
             mode_sign = self._mode_sign()
             pid = self._active_pid()
+            error = self._target_temperature - self._true_temperature
+            half_band = self._hysteresis / 2.0
 
-            # Resume from a forced-off state only once the room again demands
-            # this mode's direction (cool wants error < 0, heat wants error > 0)
-            # and the minimum off-time has elapsed.
+            # Resume from a forced-off state only once the room again demands this
+            # mode's direction by at least half the hysteresis band (cool wants the
+            # room warmer than setpoint, heat colder) and the minimum off-time has
+            # elapsed. The half-band on each side gives one full hysteresis width
+            # of swing before re-engaging, so the unit cannot short-cycle.
             if self._pid_forced_off:
-                error = self._target_temperature - self._true_temperature
                 pid.error = error  # keep diagnostics fresh while parked
                 if (
-                    mode_sign is not None and mode_sign * error <= 0
+                    mode_sign is not None and mode_sign * error <= half_band
                 ) or not self._dwell_elapsed():
                     self._publish_pid_report()
                     return
@@ -635,16 +649,19 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
                 cascade=self._power_cascade_enabled,
             )
 
-            # Hard cutoff: a tuned controller commanding an offset that opposes
-            # the active mode (beyond a deadband) means the AC should be off.
-            # Suppressed during the relay experiment, gated by the minimum
-            # on-time. If we cannot cut power yet, fall through - the opposing
-            # offset already raises the sent setpoint so the AC idles itself.
+            # Hard cutoff: when armed, cut compressor power once the room has
+            # overshot - crossed to the satisfied side of the setpoint by half the
+            # hysteresis band - instead of only easing the setpoint. Defined on the
+            # true-temperature error so it works in every control mode (plain PID
+            # and power cascade alike); suppressed only while the relay experiment
+            # runs (it overshoots on purpose) and gated by the minimum on-time.
+            # With the cutoff disarmed we fall through: the offset (which can now
+            # back off past zero) raises the sent setpoint so the AC idles itself.
             if (
-                not pid.tuning
+                not pid.relay_tuning
                 and self._overshoot_cutoff_enabled
                 and mode_sign is not None
-                and mode_sign * output < -self._cutoff_deadband
+                and mode_sign * error < -half_band
                 and self._dwell_elapsed()
             ):
                 await self._set_pid_forced_off(True)
@@ -684,6 +701,14 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
         if not enabled and self._pid_forced_off:
             # Stop parking the unit off the moment the user disarms the feature.
             self.hass.async_create_task(self._set_pid_forced_off(False))
+        elif self._true_auto_active:
+            # True Auto reads the toggle live; re-run now so the change (hard-off
+            # vs soft-idle at the setpoint) takes effect without waiting a tick.
+            self.hass.async_create_task(self._async_run_pid())
+
+    def on_hysteresis_changed(self, value):
+        """Called by the companion number when the hysteresis is changed."""
+        self.hass.async_create_task(self._async_run_pid())
 
     def force_retune(self):
         """Called by the companion button to re-tune the active mode's set."""
@@ -728,14 +753,26 @@ class LocaltuyaClimate(LocalTuyaEntity, ClimateEntity):
             return
 
         error = self._target_temperature - self._true_temperature
+        half_band = self._hysteresis / 2.0
 
-        # Desired direction with a deadband around the setpoint.
-        if error <= -self._auto_deadband:
+        # Desired direction with a hysteresis deadband around the setpoint.
+        if error <= -half_band:
             desired = HVACMode.COOL
-        elif error >= self._auto_deadband:
+        elif error >= half_band:
             desired = HVACMode.HEAT
         else:
-            desired = None  # within band -> idle
+            desired = None  # within band -> satisfied
+
+        # "Turn Off If Overshoot" governs what "satisfied" does in True Auto too:
+        # when armed (default) the unit cuts compressor power (desired stays None
+        # -> off); when disarmed, hold the current direction so its controller can
+        # ease the sent setpoint to idle the AC without cycling the compressor off.
+        if (
+            desired is None
+            and not self._overshoot_cutoff_enabled
+            and self._auto_dir in (HVACMode.COOL, HVACMode.HEAT)
+        ):
+            desired = self._auto_dir
 
         # Protect the reversing valve: hold the current direction until the
         # minimum heat<->cool dwell has elapsed.

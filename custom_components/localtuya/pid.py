@@ -101,12 +101,19 @@ def get_overshoot_state(hass, domain, dev_id, dp_id):
     * ``enabled``       - overshoot cutoff armed (default on)
     * ``true_auto``     - autonomous heat/cool/off mode active (default off)
     * ``power_cascade`` - inner power-tracking loop active (default off)
+    * ``hysteresis``    - cycling deadband around setpoint (None => entity default)
     * ``climate``       - back-reference to the climate entity
     """
     registry = hass.data[domain].setdefault(OVERSHOOT_REGISTRY, {})
     return registry.setdefault(
         f"{dev_id}_{dp_id}",
-        {"enabled": True, "true_auto": False, "power_cascade": False, "climate": None},
+        {
+            "enabled": True,
+            "true_auto": False,
+            "power_cascade": False,
+            "hysteresis": None,
+            "climate": None,
+        },
     )
 
 
@@ -519,6 +526,16 @@ class SelfTuningPID:
         return self.phase in (PHASE_UNTUNED, PHASE_TUNING)
 
     @property
+    def relay_tuning(self):
+        """Whether the disruptive relay experiment is actively driving output.
+
+        The relay deliberately overshoots to excite a limit cycle, so the
+        overshoot cutoff must stand down while it runs. It only runs outside the
+        power cascade (cascade is tuning-free), hence the ``_last_cascade`` guard.
+        """
+        return self.tuning and self.tuning_enabled and not self._last_cascade
+
+    @property
     def status(self):
         if self._last_cascade:
             return STATUS_CASCADE
@@ -640,14 +657,20 @@ class SelfTuningPID:
         meas = self.power.level
         self._cascade_meas = meas
         if meas is None:
-            # Power range not characterised yet: drive open-loop proportional to
-            # the target to create power variation and learn the range.
-            self._cascade_effort = target * limit
+            # Power range not characterised yet: act as a proportional offset
+            # controller on the *signed* demand. ``target_raw`` goes negative once
+            # the room passes setpoint, which must push the offset positive (raise
+            # the sent setpoint) to idle the AC instead of stalling at zero.
+            self._cascade_effort = max(-limit, min(limit, target_raw * limit))
         else:
             if self._cascade_effort is None:
                 self._cascade_effort = meas * limit  # seed without a jump
             self._cascade_effort += CASCADE_GAIN * limit * (target - meas)
-            self._cascade_effort = max(0.0, min(limit, self._cascade_effort))
+            # Allow the offset past zero into the backing-off direction. A power
+            # target of 0 alone will NOT stop a hysteretic AC (its own sensor sits
+            # at the sent setpoint, so it keeps modulating); the inner loop must be
+            # free to raise the sent setpoint above the AC's reading to force idle.
+            self._cascade_effort = max(-limit, min(limit, self._cascade_effort))
         return self.mode_sign * self._cascade_effort
 
     @property
